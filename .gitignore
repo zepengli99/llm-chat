@@ -1,0 +1,31 @@
+# PDF
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Env / secrets
+.env
+*.env
+
+# DB
+*.db
+*.sqlite3
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+
+# Test / coverage
+.pytest_cache/
+htmlcov/
+.coverage
