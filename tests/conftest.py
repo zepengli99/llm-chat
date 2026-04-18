@@ -29,7 +29,8 @@ async def engine():
         await conn.run_sync(Base.metadata.create_all, checkfirst=True)
     yield eng
     async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all, checkfirst=True)
+        # await conn.run_sync(Base.metadata.drop_all, checkfirst=True)
+        pass
     await eng.dispose()
 
 
