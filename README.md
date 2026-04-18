@@ -23,6 +23,29 @@ docker compose up --build
 
 Database migrations run automatically on startup via `alembic upgrade head`.
 
+## Running Tests
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+**Fast (SQLite in-memory, no Docker needed):**
+
+```bash
+pytest
+```
+
+**Against Docker PostgreSQL (same database as production):**
+
+```powershell
+# Windows PowerShell — requires `docker compose up db` first
+$env:DATABASE_URL="postgresql+asyncpg://llmchat:llmchat@localhost:5433/llmchat"; python -m pytest
+```
+
+> Note: the Docker db service is mapped to port **5433** to avoid conflicts with any local PostgreSQL instance on 5432.
+
+The test suite covers authentication: register, login, duplicate email, invalid input, wrong password, and JWT format validation.
+
 ## API Endpoints
 
 | Method | Path | Auth | Description |
@@ -70,6 +93,7 @@ tests/               # pytest tests
 
 ## What I'd Do Next
 
-- Rate limiting per user
-- CI pipeline (GitHub Actions) with linting and tests
+- CI pipeline (GitHub Actions) — `pytest` already runs locally; wire it into `.github/workflows/`
+- Rate limiting per user (e.g., `slowapi`)
 - Structured logging with request timing
+- Test coverage for `/chat` streaming and conversation history once those endpoints are complete
