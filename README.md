@@ -10,11 +10,18 @@ Built with FastAPI, PostgreSQL, and Groq (free LLM inference).
 cp .env.example .env
 # Edit .env and fill in your GROQ_API_KEY (get one free at https://console.groq.com)
 
-docker-compose up --build
+docker compose up --build
 ```
 
-The API will be available at `http://localhost:8000`.  
-Interactive docs: `http://localhost:8000/docs`
+| Service | URL |
+|---------|-----|
+| API | http://localhost:8000 |
+| Interactive docs (Swagger) | http://localhost:8000/docs |
+| Adminer (DB web UI) | http://localhost:8080 |
+
+**Adminer login** — System: `PostgreSQL`, Server: `db`, Username/Password/Database: `llmchat`
+
+Database migrations run automatically on startup via `alembic upgrade head`.
 
 ## API Endpoints
 
@@ -43,10 +50,11 @@ app/
 ├── config.py        # Settings loaded from .env
 ├── database.py      # Async DB engine and session
 ├── dependencies.py  # Shared dependencies (auth, db session)
-├── models/          # SQLAlchemy ORM models
+├── models/          # SQLAlchemy ORM models (User, Conversation, Message)
 ├── schemas/         # Pydantic request/response models
 ├── routers/         # Route handlers (auth, chat)
 └── services/        # Business logic (auth, LLM)
+alembic/             # DB migrations (alembic upgrade head runs on startup)
 tests/               # pytest tests
 ```
 
@@ -63,6 +71,5 @@ tests/               # pytest tests
 ## What I'd Do Next
 
 - Rate limiting per user
-- Database migrations with Alembic
 - CI pipeline (GitHub Actions) with linting and tests
 - Structured logging with request timing
