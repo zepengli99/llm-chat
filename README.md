@@ -4,12 +4,77 @@ A minimal LLM-powered chat API service with conversation history and JWT authent
 
 Built with FastAPI, PostgreSQL, and Groq (free LLM inference).
 
+## Architecture
+
+```
+                    ┌──────────────────────────────────────────────────┐
+                    │              FastAPI App  (:8000)                 │
+                    │                                                    │
+Browser / curl ───▶ │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │
+test_ui.html        │  │ auth router │  │ chat router  │  │  logs/  │ │
+(HTTP + SSE)        │  │ /auth/*     │  │ /chat/*      │  │ stream  │ │
+                    │  │             │  │              │  │ (SSE)   │ │
+                    │  │ register    │  │ POST /chat   │  └─────────┘ │
+                    │  │ login       │  │ GET /history │       │       │
+                    │  └──────┬──────┘  └──────┬───────┘       │       │
+                    │         │                │     SSE tokens │       │
+                    │  ┌──────▼────────────────▼──────┐         │       │
+                    │  │  Async SQLAlchemy (asyncpg)  │         │       │
+                    │  └──────────────┬───────────────┘         │       │
+                    └─────────────────┼───────────────┬─────────┘───────┘
+                                      │               │ HTTP streaming
+                          ┌───────────▼──────┐  ┌─────▼──────────────────┐
+                          │   PostgreSQL     │  │   Groq API (external)  │
+                          │   :5432 (app)    │  │   llama-3.3-70b        │
+                          │   :5433 (tests)  │  │   OpenAI-compat. API   │
+                          │                  │  └────────────────────────┘
+                          │   users          │
+                          │   conversations  │
+                          │   messages       │
+                          └──────────────────┘
+```
+
+**Request flow for `POST /chat`:**
+
+1. Client sends `{message, conversation_id?}` with a JWT Bearer token
+2. Auth middleware verifies the JWT and extracts the user
+3. Chat router loads conversation history from PostgreSQL
+4. History + new message are forwarded to Groq as a streaming request
+5. Tokens are flushed to the client as SSE chunks as they arrive
+6. Once the stream ends, the full assistant reply is persisted to PostgreSQL
+7. A final `{"done": true, "conversation_id": "..."}` event is sent
+
+## Project Structure
+
+```
+app/
+├── main.py           # FastAPI app entry point, CORS middleware, /logs/stream
+├── config.py         # Settings loaded from .env
+├── database.py       # Async DB engine and session factory
+├── dependencies.py   # Shared FastAPI dependencies (JWT auth, DB session)
+├── logging_config.py # Structured logging + broadcast handler for SSE log stream
+├── models/           # SQLAlchemy ORM models (User, Conversation, Message)
+├── schemas/          # Pydantic request/response models
+├── routers/          # Route handlers (auth, chat)
+└── services/         # Business logic (auth, LLM streaming)
+alembic/              # DB migrations — runs automatically on startup
+docker/
+└── init.sql          # Creates the llmchat_test database on first container start
+tests/                # pytest suite (24 tests, auth + chat)
+test_ui.html          # Standalone browser UI — open directly, no build needed
+.env.example          # Template — copy to .env and fill in GROQ_API_KEY
+```
+
 ## Quick Start
 
-```bash
-cp .env.example .env
-# Edit .env and fill in your GROQ_API_KEY (get one free at https://console.groq.com)
+**Prerequisites:** Docker and Docker Compose.
 
+```bash
+# 1. Copy env template and fill in your Groq API key
+#    Get one free (no credit card) at https://console.groq.com
+cp .env.example .env
+
+# 2. Start all services (API + PostgreSQL + Adminer)
 docker compose up --build
 ```
 
@@ -21,7 +86,29 @@ docker compose up --build
 
 **Adminer login** — System: `PostgreSQL`, Server: `db`, Username/Password/Database: `llmchat`
 
-Database migrations run automatically on startup via `alembic upgrade head`.
+Database migrations run automatically on startup via `alembic upgrade head` — no manual step needed.
+
+**Quick smoke test** (API must be running):
+
+```bash
+# Register
+curl -s -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"secret123"}' | jq
+
+# Login — copy the access_token from the response
+curl -s -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"secret123"}' | jq
+
+# Chat (streaming)
+curl -N http://localhost:8000/chat \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"What is the capital of France?"}'
+```
+
+Or open `test_ui.html` in a browser for an interactive UI — no build step required.
 
 ## Running Tests
 
@@ -29,7 +116,7 @@ Database migrations run automatically on startup via `alembic upgrade head`.
 pip install -r requirements-dev.txt
 ```
 
-Tests require `GROQ_API_KEY` to be set in `.env` — chat tests call the real Groq API (no mocking).
+Tests require `GROQ_API_KEY` in `.env` — chat tests call the real Groq API (no mocking; see [Design Decisions](#design-decisions--trade-offs)).
 
 **SQLite in-memory (no Docker needed):**
 
@@ -37,24 +124,33 @@ Tests require `GROQ_API_KEY` to be set in `.env` — chat tests call the real Gr
 python -m pytest tests/
 ```
 
-**Against Docker PostgreSQL (same database as production):**
+**Against Docker PostgreSQL (dedicated test database):**
 
 ```bash
-# requires `docker compose up db` first
-DATABASE_URL=postgresql+asyncpg://llmchat:llmchat@localhost:5433/llmchat python -m pytest tests/
+# Requires `docker compose up db` first
+python -m pytest tests/
 ```
 
-```powershell
+`TEST_DATABASE_URL` is preset in `.env.example` to point at the `llmchat_test` database on port 5433. The test suite creates its schema at session start and drops it at the end — it never touches the `llmchat` production database.
+
+**Overriding the URL inline** (e.g. CI without a `.env` file):
+
+```bash
+# Linux / macOS
+TEST_DATABASE_URL="postgresql+asyncpg://llmchat:llmchat@localhost:5433/llmchat_test" python -m pytest tests/
+
 # Windows PowerShell
-$env:DATABASE_URL="postgresql+asyncpg://llmchat:llmchat@localhost:5433/llmchat"; python -m pytest tests/
+$env:TEST_DATABASE_URL="postgresql+asyncpg://llmchat:llmchat@localhost:5433/llmchat_test"; python -m pytest tests/
 ```
 
 > The Docker db service maps to port **5433** locally to avoid conflicts with any existing PostgreSQL on 5432.
 
-The test suite covers two modules (24 tests total):
+**Test coverage (24 tests total):**
 
-- **Auth** — register, login, duplicate email, invalid input, wrong password, JWT format (8 tests, no external calls)
-- **Chat** — SSE streaming, conversation creation and continuation, message persistence, data isolation between users, history list and detail, auth protection (16 tests, calls the real Groq API)
+| Module | Tests | External calls |
+|--------|-------|---------------|
+| Auth — register, login, duplicate email, invalid input, wrong password, JWT format | 8 | None |
+| Chat — SSE streaming, conversation create/continue, message persistence, user isolation, history list/detail, auth protection | 16 | Groq API |
 
 ## Database Schema
 
@@ -83,7 +179,7 @@ Represents a single chat session belonging to a user. A new conversation is crea
 
 ### `messages`
 
-A single message within a conversation. `role` distinguishes user input (`user`) from model replies (`assistant`). Messages are ordered by `created_at` and passed as the context window to the LLM, enabling multi-turn dialogue. Deleting a conversation cascades to all its messages.
+A single message within a conversation. `role` distinguishes user input (`user`) from model replies (`assistant`). Messages are ordered by `created_at` and passed as the full context window to the LLM, enabling multi-turn dialogue. Deleting a conversation cascades to all its messages.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -101,45 +197,33 @@ Register a new user. Returns the created user's id and email.
 
 **Request**
 ```json
-{
-  "email": "alice@example.com",
-  "password": "secret123"
-}
+{ "email": "alice@example.com", "password": "secret123" }
 ```
 
 **Response** `201 Created`
 ```json
-{
-  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "email": "alice@example.com"
-}
+{ "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "email": "alice@example.com" }
 ```
 
-**Error** `409 Conflict` — email already registered.
+**Errors:** `409 Conflict` — email already registered · `422 Unprocessable Entity` — invalid input
 
 ---
 
 ### `POST /auth/login`
 
-Authenticate and receive a JWT bearer token.
+Authenticate and receive a JWT bearer token (valid for 24 h by default).
 
 **Request**
 ```json
-{
-  "email": "alice@example.com",
-  "password": "secret123"
-}
+{ "email": "alice@example.com", "password": "secret123" }
 ```
 
 **Response** `200 OK`
 ```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer"
-}
+{ "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...", "token_type": "bearer" }
 ```
 
-**Error** `401 Unauthorized` — wrong email or password.
+**Error:** `401 Unauthorized` — wrong email or password
 
 ---
 
@@ -153,10 +237,7 @@ Omit `conversation_id` to start a new conversation; include it to continue an ex
 
 **Request**
 ```json
-{
-  "message": "What is the capital of France?",
-  "conversation_id": null
-}
+{ "message": "What is the capital of France?", "conversation_id": null }
 ```
 
 **Response** — `text/event-stream`
@@ -174,7 +255,7 @@ data: {"done": true, "conversation_id": "a1b2c3d4-..."}
 
 The final `done` event carries the `conversation_id` to use for follow-up messages.
 
-**Error** `404 Not Found` — `conversation_id` does not exist or belongs to another user.
+**Errors:** `401 Unauthorized` — missing/invalid token · `404 Not Found` — `conversation_id` not found or belongs to another user
 
 ---
 
@@ -210,63 +291,78 @@ Get a single conversation with its full message history, ordered by time.
     "updated_at": "2026-04-18T10:00:05Z"
   },
   "messages": [
-    {
-      "id": "b2c3d4e5-...",
-      "role": "user",
-      "content": "What is the capital of France?",
-      "created_at": "2026-04-18T10:00:00Z"
-    },
-    {
-      "id": "c3d4e5f6-...",
-      "role": "assistant",
-      "content": "The capital of France is Paris.",
-      "created_at": "2026-04-18T10:00:05Z"
-    }
+    { "id": "b2c3d4e5-...", "role": "user",      "content": "What is the capital of France?", "created_at": "2026-04-18T10:00:00Z" },
+    { "id": "c3d4e5f6-...", "role": "assistant", "content": "The capital of France is Paris.", "created_at": "2026-04-18T10:00:05Z" }
   ]
 }
 ```
 
-**Error** `404 Not Found` — conversation does not exist or belongs to another user.
+**Error:** `404 Not Found` — conversation does not exist or belongs to another user
 
-## Design Decisions
+---
 
-**PostgreSQL** over SQLite — supports concurrent connections, proper foreign key constraints, and realistic indexing. Runs as a Docker service alongside the app.
+### `GET /logs/stream`
 
-**Groq** as LLM provider — free tier, no credit card required, OpenAI-compatible API, fast inference ideal for streaming demos.
-
-**Server-Sent Events (SSE)** over WebSocket — simpler protocol for one-directional streaming (server → client), HTTP-native, easier to test with `curl`.
-
-**Async SQLAlchemy** — matches FastAPI's async model; avoids blocking the event loop on DB queries.
-
-## Project Structure
+Stream live structured log entries as **Server-Sent Events**. Intended for local development and debugging only — **no auth required; do not expose in production**.
 
 ```
-app/
-├── main.py          # FastAPI app entry point
-├── config.py        # Settings loaded from .env
-├── database.py      # Async DB engine and session
-├── dependencies.py  # Shared dependencies (auth, db session)
-├── models/          # SQLAlchemy ORM models (User, Conversation, Message)
-├── schemas/         # Pydantic request/response models
-├── routers/         # Route handlers (auth, chat)
-└── services/        # Business logic (auth, LLM)
-alembic/             # DB migrations (alembic upgrade head runs on startup)
-tests/               # pytest tests
+data: {"time": "10:23:01", "level": "INFO", "name": "app.routers.chat", "message": "llm stream started  conversation=..."}
+data: {"time": "10:23:03", "level": "INFO", "name": "app.routers.chat", "message": "llm stream complete conversation=...  tokens=42"}
 ```
+
+```bash
+curl -N http://localhost:8000/logs/stream
+```
+
+## Browser Test UI
+
+`test_ui.html` is a standalone single-file UI for exercising the API without any tooling. Open it directly in a browser (no build step, no server needed):
+
+- **Auth panel** — register a user and log in; the returned JWT is saved automatically
+- **Chat panel** — send messages, stream token-by-token replies via SSE, continue existing conversations
+- **Log panel** — connects to `GET /logs/stream` and shows live structured log entries in real time
+
+The page assumes the API is running at `http://localhost:8000`. Change the `BASE` constant at the top of the file to point elsewhere.
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `POSTGRES_USER/PASSWORD/DB` | Used by docker-compose |
-| `JWT_SECRET_KEY` | Secret for signing JWT tokens |
-| `JWT_EXPIRE_MINUTES` | Token expiry (default: 1440 = 24h) |
-| `GROQ_API_KEY` | Groq API key |
+| `DATABASE_URL` | PostgreSQL connection string (used by the running app) |
+| `TEST_DATABASE_URL` | PostgreSQL connection string for the isolated test database |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Docker Compose DB container initialisation |
+| `JWT_SECRET_KEY` | Secret for signing JWT tokens — change before deploying |
+| `JWT_EXPIRE_MINUTES` | Token lifetime in minutes (default: `1440` = 24 h) |
+| `GROQ_API_KEY` | Groq API key — get one free at https://console.groq.com |
+
+## Design Decisions & Trade-offs
+
+**PostgreSQL over SQLite**
+Chosen for concurrent connections, proper foreign-key constraints, and realistic indexing under multi-user load. The trade-off is added setup complexity (Docker service required). SQLite is used automatically in tests when no `TEST_DATABASE_URL` is set, so contributors can run the auth tests without Docker.
+
+**Groq as LLM provider**
+Free tier, no credit card, OpenAI-compatible API, and fast inference ideal for streaming demos. Trade-off: external dependency — tests that exercise the chat flow call the real Groq API rather than a mock. This catches real integration failures (token format, stream errors) at the cost of test speed and network dependency.
+
+**Server-Sent Events over WebSockets**
+SSE is a simpler, HTTP-native protocol for one-directional server→client streaming. It needs no handshake, works through standard HTTP proxies, and is trivially testable with `curl`. Trade-off: SSE is unidirectional — if bidirectional messaging (e.g. cancel mid-stream) is needed later, a WebSocket upgrade would be required.
+
+**Async SQLAlchemy with asyncpg**
+Matches FastAPI's async model and avoids blocking the event loop on DB queries. Trade-off: the async SQLAlchemy API is more verbose than its sync counterpart, and some ORM features (e.g. lazy loading) behave differently.
+
+**SSE generator owns its own DB session**
+`_sse_generator` opens and closes its own `AsyncSessionLocal` rather than sharing the route handler's session. FastAPI closes the route's session before streaming finishes, so sharing it would cause detached-instance errors on long-running streams. Trade-off: the generator must manage its own session lifecycle carefully.
+
+**Full conversation history as LLM context**
+Every message in the conversation is sent to Groq on each request. This gives the model full context for multi-turn dialogue but grows linearly with conversation length. For very long conversations this will exceed the model's context window and increase latency. A rolling-window or summarisation strategy would be needed at scale.
+
+**CORS enabled for all origins**
+Required for `test_ui.html` served from `file://`, which triggers the browser's CORS policy. **Restrict `allow_origins` to specific domains before deploying to production.**
 
 ## What I'd Do Next
 
-- CI pipeline (GitHub Actions) — `pytest` already runs locally; wire it into `.github/workflows/`
-- Rate limiting per user (e.g., `slowapi`)
-- Structured logging with request timing and correlation IDs
-- Conversation title auto-generation via a short LLM summarisation call instead of the first-50-chars truncation
+- **CI pipeline** (GitHub Actions) — `pytest` already runs locally; wire it into `.github/workflows/`
+- **Rate limiting per user** — e.g. `slowapi` to prevent API abuse
+- **Rolling context window** — cap the history sent to the LLM instead of growing unbounded
+- **Conversation title generation** — short LLM summarisation call instead of the first-50-chars truncation
+- **Restrict CORS** `allow_origins` to specific domains before production deployment
+- **Gate `GET /logs/stream`** behind authentication or remove it entirely in production builds

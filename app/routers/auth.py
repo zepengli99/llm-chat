@@ -13,8 +13,26 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
 
 
-@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new user",
+    response_description="The newly created user's ID and email.",
+    responses={
+        409: {"description": "Email already registered."},
+        422: {"description": "Validation error — invalid email format or password too short (< 8 chars)."},
+    },
+)
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Create a new user account.
+
+    - **email**: must be a valid email address and globally unique.
+    - **password**: minimum 8 characters; stored as a bcrypt hash — never returned by the API.
+
+    Returns the new user's `id` and `email`. Use `POST /auth/login` to obtain a JWT token.
+    """
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -27,8 +45,27 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     return user
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Log in and obtain a JWT token",
+    response_description="A bearer token valid for `JWT_EXPIRE_MINUTES` minutes (default 24 h).",
+    responses={
+        401: {"description": "Wrong email or password."},
+    },
+)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Authenticate with email and password.
+
+    Returns a **JWT bearer token**. Include it in subsequent requests as:
+
+    ```
+    Authorization: Bearer <access_token>
+    ```
+
+    The token expires after `JWT_EXPIRE_MINUTES` minutes (default: 1440 = 24 h).
+    """
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
