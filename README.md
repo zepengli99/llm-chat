@@ -78,6 +78,15 @@ cp .env.example .env
 docker compose up --build
 ```
 
+> **Schema changes** are handled automatically by Alembic — just restart the container (`docker compose up --build`) and migrations run on startup. **No volume wipe needed.**
+>
+> **Fresh start / reset** (only needed if the database is in a truly broken state):
+> ```bash
+> docker compose down -v   # wipes the postgres_data volume — destroys all data
+> docker compose up --build
+> ```
+> Also required if `docker/init.sql` changed, since it only runs when the volume is first created (it creates the `llmchat_test` database for tests).
+
 | Service | URL |
 |---------|-----|
 | API | http://localhost:8000 |
