@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 
@@ -17,6 +18,7 @@ from app.schemas.chat import ChatRequest, ConversationHistoryOut, ConversationOu
 from app.services.llm_service import stream_chat
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 
 async def _get_or_create_conversation(
@@ -44,6 +46,7 @@ async def _get_or_create_conversation(
     conversation = Conversation(user_id=user.id, title=title)
     db.add(conversation)
     await db.flush()
+    logger.info("created conversation %s for user %s", conversation.id, user.id)
     return conversation
 
 
@@ -72,11 +75,13 @@ async def _sse_generator(
     history = await _build_message_history(db, conversation.id)
 
     full_response: list[str] = []
+    logger.info("llm stream started  conversation=%s", conversation.id)
     try:
         async for token in stream_chat(history):
             full_response.append(token)
             yield f"data: {json.dumps({'token': token})}\n\n"
     except Exception as exc:
+        logger.exception("llm stream error  conversation=%s", conversation.id)
         yield f"data: {json.dumps({'error': str(exc)})}\n\n"
         await db.rollback()
         return
@@ -88,6 +93,7 @@ async def _sse_generator(
     )
     db.add(assistant_msg)
     await db.commit()
+    logger.info("llm stream complete conversation=%s  tokens=%d", conversation.id, len(full_response))
 
     yield f"data: {json.dumps({'done': True, 'conversation_id': str(conversation.id)})}\n\n"
 
