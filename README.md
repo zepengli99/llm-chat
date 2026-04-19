@@ -1,5 +1,7 @@
 # LLM Chat API
 
+[![CI](https://github.com/zepengli99/llm-chat/actions/workflows/ci.yml/badge.svg)](https://github.com/zepengli99/llm-chat/actions/workflows/ci.yml)
+
 A minimal LLM-powered chat API service with conversation history and JWT authentication.
 
 Built with FastAPI, PostgreSQL, and Groq (free LLM inference).
@@ -369,7 +371,6 @@ Required for `test_ui.html` served from `file://`, which triggers the browser's 
 
 ## What I'd Do Next
 
-- **CI pipeline** (GitHub Actions) — `pytest` already runs locally; wire it into `.github/workflows/`
 - **Rate limiting per user** — e.g. `slowapi` to prevent API abuse
 - **Rolling context window** — cap the history sent to the LLM instead of growing unbounded
 - **Conversation title generation** — short LLM summarisation call instead of the first-50-chars truncation
